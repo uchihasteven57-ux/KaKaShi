@@ -33,6 +33,7 @@
       reportTo: '',
       currentType: 'expense',
       lastCarryMonth: null,
+      lastCarryAmount: 0,
       budgetAlerts: {},
       budgetsLastRefreshedMonth: null
     };
@@ -421,12 +422,31 @@
   }
 
   function renderDashboardStats() {
-    const monthKey = currentMonth();
-    const rows = (state.transactions || []).filter(tx => String(tx.date || '').slice(0,7) === monthKey);
-    const t = totals(rows);
-    const cashflow = (t.income || 0) - (t.expense || 0) - (t.loan || 0) - (t.credit || 0);
+    // Use the report range when set; otherwise use the single report month
+    const fromMonth = state.reportFrom || '';
+    const toMonth = state.reportTo || '';
+    let rows;
+    if (fromMonth || toMonth) {
+      // Use same helper as Transactions page so behavior is consistent
+      rows = (state.transactions || []).filter(tx => txWithinMonthRange(tx, fromMonth || null, toMonth || null));
+    } else {
+      const monthKey = currentMonth();
+      rows = (state.transactions || []).filter(tx => String(tx.date || '').slice(0,7) === monthKey);
+    }
 
-    const cfEl = $('cashflow'); if (cfEl) cfEl.textContent = money(cashflow);
+    const t = totals(rows);
+    const remainingMoney = (t.income || 0) - (t.expense || 0) - (t.loan || 0) - (t.credit || 0);
+    const now = new Date();
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+    const daysLeft = Math.max(1, daysInMonth - now.getDate() + 1);
+    const daily = Math.max(0, Math.floor(remainingMoney / daysLeft));
+    const map = [['income', t.income], ['expense', t.expense], ['loan', t.loan], ['daily', daily], ['remaining', remainingMoney]];
+
+    map.forEach(([id,val]) => {
+      const el = $(id); if (!el) return;
+      const strong = el.querySelector('strong');
+      if (strong) strong.textContent = money(val); else el.textContent = money(val);
+    });
 
     const expenseRows = rows.filter(tx => tx.type === 'expense');
     const spendByCat = {};
@@ -453,6 +473,22 @@
     const largestAmtEl = $('largestAmt'); if (largestAmtEl) largestAmtEl.textContent = money(largestAmt);
 
     const rhythmEl = $('rhythm'); if (rhythmEl) rhythmEl.textContent = String(rows.length || 0);
+
+    // Show carry-over report if present in this view
+    const carrySum = (rows || []).filter(tx => tx.autoCarry).reduce((s, tx) => s + (Number(tx.amount) || 0), 0);
+    const committedEl = $('committed');
+    if (committedEl) {
+      // preserve existing committed number if present as text - the earlier mapping sets it
+      const existingText = committedEl.textContent || '';
+      // Show base committed text and append carry info when present
+      if (carrySum > 0) {
+        // Append carry info after a middot so UI remains concise
+        committedEl.textContent = `${existingText} • Carry: ${money(carrySum)}`;
+      } else {
+        // If there is no carry in this view, ensure committed shows just the base (mapped) value
+        // The map assignment earlier already set base; nothing else required
+      }
+    }
   }
 
   function getLastNMonthKeys(n = 12, endISO = today) {
@@ -1093,6 +1129,7 @@
         if ($('reportToInput')) $('reportToInput').value = '';
         txPageIndex = 0;
         renderTransactionsPage(0);
+        renderAll(); // update dashboard and charts to reflect cleared filter
       });
 
       $('reportFromInput')?.addEventListener('change', () => {
@@ -1100,6 +1137,7 @@
         saveState();
         txPageIndex = 0;
         renderTransactionsPage(0);
+        renderAll(); // update dashboard and charts for new range
       });
 
       $('reportToInput')?.addEventListener('change', () => {
@@ -1107,6 +1145,7 @@
         saveState();
         txPageIndex = 0;
         renderTransactionsPage(0);
+        renderAll(); // update dashboard and charts for new range
       });
 
       window.addEventListener('resize', () => { updateNavDisplay(document.querySelector('.page.active')?.id || 'home'); renderTrendChart(); });
@@ -1160,7 +1199,7 @@
 
   function applyCarryOverIfNeeded() {
     try {
-      if (!state.settings || !state.settings.carryOver) return;
+      // Run carry over always (no toggle required). It will only apply once per month.
       const nowMonth = today.slice(0,7);
       if (state.lastCarryMonth === nowMonth) return;
 
@@ -1182,11 +1221,14 @@
         };
         state.transactions.push(tx);
         state.lastCarryMonth = nowMonth;
+        state.lastCarryAmount = Number(remainingMoney);
         saveState();
         scheduleSync();
         toast(`Carried over ${money(remainingMoney)} to ${nowMonth}`);
       } else {
+        // record that we attempted and nothing to carry
         state.lastCarryMonth = nowMonth;
+        state.lastCarryAmount = 0;
         saveState();
       }
     } catch (e) {
